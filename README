@@ -1,0 +1,135 @@
+                                 IP Accountant
+
+                                  pedram amini
+                 pedram@redhive.com, http://pedram.redhive.com
+
+
+-- What is it? -----------------------------------------------------------------
+Running a server with multiple IP addresses aliased to one interface I needed a
+way to keep an RX/TX byte count for each address. A quick search on the internet
+revealed a number of userland solutions. Unsatisfied with the unreliability and
+overhead associated with a userland solution I set out to make my own.
+
+IP Accountant is basically an IPTables wrapper. It's the successful marriage of
+a few "low tech" ideas. I think you'll like it, I certainly do. IP Accountant
+gives you three reporting methods. The first is a standard command line human
+readable output. The second is an interface to RRDTool to create some pretty
+graphs. The third is an HTML report.
+
+
+-- Requirements ----------------------------------------------------------------
+IPTables - mandatory
+Perl     - mandatory
+RRDTool  - only needed if you want the pretty graphs
+
+
+-- Installation ----------------------------------------------------------------
+Assuming that you have both Perl and IPTables up and running the first step is
+setting up the IPTables rules to keep a byte count for your IP addresses. I did
+this with the following simple shell script:
+
+IPTABLES="/sbin/iptables"
+EXTERNAL_INTERFACE="eth0"
+SUBNET1="111.222.333"
+FIRST1=50
+LAST1=75
+
+I=$FIRST1;
+
+while [ $I -le $LAST1 ]; do
+    $IPTABLES -A INPUT  -i $EXTERNAL_INTERFACE -d $SUBNET1.$I -j ACCEPT
+    $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $SUBNET1.$I -j ACCEPT
+
+    let I=$I+1;
+done;
+
+You'll have to setup seperate loops/variables for your various aliasing ranges.
+This is our first "low tech" solution. We setup these pseudo rules to force
+IPTables to match and hence count the traffic going through them. Generate some
+traffic and then make sure all is well with the following command:
+
+    iptables -vxnL
+
+With that aside lets move to the next step. IP Accountant converts IP addresses
+to hostnames by processing /etc/hosts, so make sure you have an entry for each
+one of your IP addresses. For example:
+
+    111.222.333.50      www.redhive.com         redhive
+    111.222.333.51      pedram.redhive.com      pedram
+    ...
+
+Next, we probably want to clear the byte count on a monthly basis so throw the
+following line into a file and drop that in /etc/cron.monthly:
+
+    /usr/local/sbin/iptables -Z
+
+Next, open up ip_accountant.pl in your favorite editor and set the configuration
+variables at the top (various binary paths, etc...). At this point you should be
+good to go. Try executing ip_accountant.pl and see if everything works ok. If
+you want to see the pretty graphs your work isn't finished yet. You must first
+create the round robin databases, to do so issue an rrd create command for each
+of your addresses. Example:
+
+    rrdtool create www.redhive.com.rrd \
+            --step 300                 \
+            DS:rx:COUNTER:600:U:U      \
+            DS:tx:COUNTER:600:U:U      \
+            RRA:AVERAGE:0.5:1:2016
+
+This DB will store a weeks worth of 5 minute samples for both RX and TX, it
+takes less then 40k of disk space. Although it isn't by any means necessary if
+your interested in my directory layout for RRD this is what I use:
+
+    /rrd/db         - contains all round robin databases
+    /rrd/scripts    - contains all the scripts used to update / graph the rrd's.
+                      my cron scripts are in here too, I link to them from
+                      /etc/cron.d
+
+You will next have to setup a cron job that will periodically update the DB's.
+I use the following in my cron.d script:
+
+    # record ip accounting information every 5 minutes.
+    */5 * * * * root /rrd/scripts/ip_accountant rrd
+
+The next step is to create the graphs. I use one per IP address. Here is a
+sample script:
+
+    rrdtool graph /www/redhive/rrdgraphs/www.redhive.com.gif \
+            --title "www.redhive.com"                        \
+            --width 600                                      \
+            --color BACK#FFFFFF                              \
+            --color SHADEA#FFFFFF                            \
+            --color SHADEB#FFFFFF                            \
+            --color CANVAS#F0F0F0                            \
+            --color GRID#CCCCCC                              \
+            --color MGRID#999999                             \
+            --color FONT#000000                              \
+            --color FRAME#FFFFFF                             \
+            --start -86400                                   \
+            --vertical-label "bytes/sec"                     \
+            --no-legend                                      \
+            DEF:myrx=/rrd/db/www.redhive.com.rrd:rx:AVERAGE  \
+            DEF:mytx=/rrd/db/www.redhive.com.rrd:tx:AVERAGE  \
+            LINE1:myrx#FF0000:Rx                             \
+            LINE1:mytx#0000FF:Tx
+
+You'll probably want to setup some kind of cron job for graph creation as well.
+I do it on an hourly basis with the following my cron.d script:
+
+    # recreate the graphs every hour.
+    0 * * * * root /rrd/scripts/make_graphs.sh > /dev/null
+
+The last feature we have yet to cover is the HTML reporting feature. I simply
+use the following entry in my cron.d script:
+
+    # recreate the HTML report every week.
+    * * * * 0 root /rrd/scripts/ip_accountant html
+
+That's it.
+
+
+-- Further Expansions ----------------------------------------------------------
+With the foundation laid if anyone wants to use IP Accountant to monitor other
+tables (FORWARD, custom tables, etc...) it should be a trivial matter. Just step
+through the scripts and add as necessary. If anyone comes up with a nicer layout
+drop me a link maybe I'll change the default.
